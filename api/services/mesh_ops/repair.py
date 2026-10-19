@@ -88,8 +88,21 @@ def _run_pass(
     current = mesh_set.current_mesh()
     mesh = _merged(current.vertex_matrix(), current.face_matrix(), trimesh_module)
     if not mesh.is_winding_consistent:
-        trimesh_module.repair.fix_winding(mesh)
-        steps.append("reorient_faces")
+        # pymeshlab rather than trimesh.repair.fix_winding, which needs
+        # networkx: not one of Modly's dependencies.
+        mesh_set = pymeshlab_module.MeshSet()
+        mesh_set.add_mesh(
+            pymeshlab_module.Mesh(vertex_matrix=mesh.vertices, face_matrix=mesh.faces)
+        )
+        try:
+            mesh_set.meshing_re_orient_faces_coherently()
+        except Exception as exc:
+            # Orientation needs a manifold mesh; the next pass fixes that first.
+            context.log(f"Face re-orientation skipped this pass: {exc}")
+        else:
+            current = mesh_set.current_mesh()
+            mesh = _merged(current.vertex_matrix(), current.face_matrix(), trimesh_module)
+            steps.append("reorient_faces")
     return mesh, steps
 
 
