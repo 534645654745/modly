@@ -5,6 +5,7 @@ import struct
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from .geometry import merged_geometry, scene_meshes
 from .types import (
     MeshOpContext,
     MeshOpExecutionError,
@@ -29,22 +30,6 @@ def _trimesh():
             "inspect_mesh: trimesh is not available on this system"
         ) from exc
     return trimesh
-
-
-def _scene_meshes(loaded, trimesh_module) -> list[tuple]:
-    """Return (geometry, world transform or None) for every non-empty triangle mesh."""
-    if not isinstance(loaded, trimesh_module.Scene):
-        candidates = [(loaded, None)]
-    else:
-        candidates = []
-        for node in loaded.graph.nodes_geometry:
-            transform, geometry_name = loaded.graph[node]
-            candidates.append((loaded.geometry.get(geometry_name), transform))
-    return [
-        (geometry, transform)
-        for geometry, transform in candidates
-        if isinstance(geometry, trimesh_module.Trimesh) and len(geometry.faces)
-    ]
 
 
 def _has_uvs(geometry, trimesh_module) -> bool:
@@ -101,32 +86,6 @@ def _file_has_normals(input_path: Path) -> Optional[bool]:
     except (OSError, ValueError):
         return None
     return None
-
-
-def _merged_geometry(parts, trimesh_module):
-    """Concatenate the parts into one position-merged mesh for topology checks.
-
-    Visuals are dropped on purpose: UV seams split vertices, and without merging
-    by position every textured mesh would look open along its seams.
-    """
-    import numpy as np
-
-    vertices = []
-    faces = []
-    offset = 0
-    for geometry, transform in parts:
-        points = np.asarray(geometry.vertices, dtype=float)
-        if transform is not None:
-            points = trimesh_module.transformations.transform_points(points, transform)
-        vertices.append(points)
-        faces.append(np.asarray(geometry.faces, dtype=np.int64) + offset)
-        offset += len(points)
-
-    return trimesh_module.Trimesh(
-        vertices=np.vstack(vertices),
-        faces=np.vstack(faces),
-        process=True,
-    )
 
 
 def _edge_topology(merged, trimesh_module) -> dict[str, Any]:
@@ -216,14 +175,14 @@ def build_report(
 
     context.progress(10, "Loading mesh…")
     loaded = trimesh.load(str(input_path), process=False)
-    parts = _scene_meshes(loaded, trimesh)
+    parts = scene_meshes(loaded, trimesh)
     if not parts:
         raise MeshOpExecutionError(
             f"inspect_mesh: {input_path.name} contains no triangle mesh"
         )
 
     context.progress(30, "Analysing topology…")
-    merged = _merged_geometry(parts, trimesh)
+    merged = merged_geometry(parts, trimesh)
     topology = _edge_topology(merged, trimesh)
     is_watertight = bool(merged.is_watertight)
     is_winding_consistent = bool(merged.is_winding_consistent)

@@ -30,6 +30,7 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 - **get_mesh_info** — Get info about the current mesh in the 3D viewer (path, triangle count).
 - **inspect_mesh(path)** — Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.
 - **suggest_fixes(path)** — Inspect a mesh and list the operations (with params) that would fix its problems.
+- **arrange_mesh(path, steps, size?, unit?, dimension?)** — Reposition a mesh in one call. Steps: `auto_orient` (lay it flat on its widest side), `normalize_scale` (resize to `size` in `unit`), `recenter` (centre on the origin), `drop_to_ground` (rest it on the ground). Steps always run in that order, whatever order you list them in.
 - **decimate_mesh(path, target_faces)** — Reduce the polygon count of a mesh.
 - **smooth_mesh(path, iterations)** — Apply Laplacian smoothing to a mesh.
 - **get_generation_status(job_id)** — Poll the status of an ongoing 3D generation job.
@@ -41,6 +42,7 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 
 - Always use tools to act on the scene — never just describe what you would do.
 - If you need the current mesh path, call get_mesh_info first.
+- To center, ground, lay flat or resize a mesh, call arrange_mesh ONCE with every requested step — never one call per step.
 - To answer questions about a mesh's quality or printability, call inspect_mesh — never guess. Before repairing a mesh, call suggest_fixes to pick the right operations.
 - If you need to run a workflow but don't know the ID, call list_workflows first.
 - To create a workflow, ONLY use extension ids listed under "Available extensions" in the context. Never invent an id. Chain steps so each step's input type matches the previous step's output type.
@@ -106,6 +108,53 @@ TOOLS = [
                     },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "arrange_mesh",
+            "description": (
+                "Reposition a mesh in a single call: lay it flat, resize it, centre it and/or "
+                "rest it on the ground. Pass every requested step at once; they always run in "
+                "the order auto_orient → normalize_scale → recenter → drop_to_ground."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["auto_orient", "normalize_scale", "recenter", "drop_to_ground"],
+                        },
+                        "description": (
+                            "auto_orient: lay flat on its widest side (a standing figure is laid down). "
+                            "normalize_scale: resize to `size`. recenter: centre on the origin. "
+                            "drop_to_ground: lowest point at height 0."
+                        ),
+                    },
+                    "size": {
+                        "type": "number",
+                        "description": "normalize_scale only: target size of `dimension`, in `unit`.",
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["m", "cm", "mm"],
+                        "description": "normalize_scale only: unit of `size`. Default m.",
+                    },
+                    "dimension": {
+                        "type": "string",
+                        "enum": ["longest", "x", "y", "z"],
+                        "description": "normalize_scale only: which side gets `size` (y is the height). Default longest.",
+                    },
+                },
+                "required": ["path", "steps"],
             },
         },
     },
@@ -377,6 +426,28 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                 )
                 r.raise_for_status()
                 return _format_fixes(r.json()), None
+
+            elif name == "arrange_mesh":
+                scale_params = {
+                    key: arguments[key] for key in ("size", "unit", "dimension")
+                    if arguments.get(key) is not None
+                }
+                r = await client.post(
+                    f"{MODLY_API}/optimize/arrange",
+                    json={
+                        "path": arguments["path"],
+                        "steps": arguments.get("steps") or [],
+                        "params": {"normalize_scale": scale_params} if scale_params else {},
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                dims = " × ".join(f"{d:.4g}" for d in data.get("dimensions", []))
+                text = (
+                    f"Applied {' → '.join(data.get('applied', []))}. "
+                    f"New mesh path: {data['path']}. Dimensions (x × y × z, metres): {dims}."
+                )
+                return text, {"type": "mesh_update", "url": data["url"]}
 
             elif name == "decimate_mesh":
                 r = await client.post(

@@ -19,10 +19,20 @@ class MeshOpsRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             [description["id"] for description in descriptions],
-            ["repair", "decimate", "smooth", "inspect_mesh", "suggest_fixes"],
+            [
+                "repair",
+                "decimate",
+                "smooth",
+                "inspect_mesh",
+                "suggest_fixes",
+                "recenter",
+                "drop_to_ground",
+                "auto_orient",
+                "normalize_scale",
+            ],
         )
         for description in descriptions:
-            self.assertIn(description["category"], {"repair", "optimization", "analysis"})
+            self.assertIn(description["category"], {"repair", "optimization", "analysis", "transform"})
             self.assertFalse(description["destructive"])
             self.assertTrue(description["undoable"])
             self.assertIsInstance(description["params_schema"], list)

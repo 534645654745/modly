@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from unittest import mock
 
@@ -116,6 +117,55 @@ class InspectMeshToolTests(unittest.TestCase):
         text, _ = self._run("suggest_fixes", {"report": {}, "fixes": [], "notes": []})
 
         self.assertIn("No fixes needed", text)
+
+
+class ArrangeMeshToolTests(unittest.TestCase):
+    def _run(self, arguments: dict) -> tuple[str, object, list]:
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={
+                "path": "Default/mesh_xf_1234abcd.glb",
+                "url": "/workspace/Default/mesh_xf_1234abcd.glb",
+                "applied": ["auto_orient", "recenter", "drop_to_ground"],
+                "dimensions": [0.2, 0.05, 0.1],
+            })
+
+        factory = _MockClientFactory(handler)
+        with mock.patch.object(agent.httpx, "AsyncClient", factory):
+            text, payload = asyncio.run(agent.execute_tool("arrange_mesh", arguments, {}))
+        return text, payload, requests
+
+    def test_all_steps_go_in_one_request_and_the_new_path_is_reported(self) -> None:
+        text, payload, requests = self._run({
+            "path": "Default/mesh.glb",
+            "steps": ["drop_to_ground", "recenter", "auto_orient"],
+        })
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].url.path, "/optimize/arrange")
+        self.assertEqual(json.loads(requests[0].content), {
+            "path": "Default/mesh.glb",
+            "steps": ["drop_to_ground", "recenter", "auto_orient"],
+            "params": {},
+        })
+        # The path lets the model chain another tool on the result.
+        self.assertIn("New mesh path: Default/mesh_xf_1234abcd.glb", text)
+        self.assertEqual(payload, {"type": "mesh_update", "url": "/workspace/Default/mesh_xf_1234abcd.glb"})
+
+    def test_scale_arguments_become_normalize_scale_params(self) -> None:
+        _, _, requests = self._run({
+            "path": "Default/mesh.glb",
+            "steps": ["normalize_scale"],
+            "size": 20,
+            "unit": "cm",
+        })
+
+        self.assertEqual(
+            json.loads(requests[0].content)["params"],
+            {"normalize_scale": {"size": 20, "unit": "cm"}},
+        )
 
 
 if __name__ == "__main__":

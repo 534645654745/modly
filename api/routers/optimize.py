@@ -2,6 +2,7 @@ import hashlib
 import os
 import tempfile
 import uuid
+from contextlib import contextmanager
 
 import numpy as np
 import trimesh
@@ -23,6 +24,7 @@ from services.mesh_ops import (
     MeshOpUnavailableError,
     mesh_ops_registry,
 )
+from services.mesh_ops.transforms import apply_transforms, transform_file
 
 router = APIRouter(tags=["optimize"])
 
@@ -45,6 +47,12 @@ class MeshOpRequest(BaseModel):
 class TransformRequest(BaseModel):
     path: str                    # format: "{collection}/{filename}"
     matrix: list[list[float]]    # row-major 4x4 world transform
+
+
+class ArrangeRequest(BaseModel):
+    path: str                    # format: "{collection}/{filename}"
+    steps: list[str]             # transform op ids, applied in canonical order
+    params: dict[str, dict[str, object]] = Field(default_factory=dict)  # per step id
 
 
 def _resolve_input_path(raw_path: str) -> Path:
@@ -75,6 +83,33 @@ def _operation_output_path(input_path: Path, output_name: str) -> Path:
     return output_dir / output_name
 
 
+def _operation_context(
+    output_path: Path | None = None,
+    preserve_visuals: bool = False,
+) -> MeshOpContext:
+    return MeshOpContext(
+        workspace_dir=registry.WORKSPACE_DIR,
+        temp_dir=Path(tempfile.gettempdir()),
+        output_path=output_path,
+        preserve_visuals=preserve_visuals,
+    )
+
+
+@contextmanager
+def _mesh_op_http_errors(unknown_status: int = 404):
+    """Translate mesh-op failures into HTTP errors."""
+    try:
+        yield
+    except MeshOpNotFoundError as exc:
+        raise HTTPException(unknown_status, f"Unknown mesh operation: {exc}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (MeshOpUnavailableError, MeshOpExecutionError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _run_operation(
     operation_id: str,
     input_path: Path,
@@ -82,22 +117,9 @@ def _run_operation(
     output_path: Path | None = None,
     preserve_visuals: bool = False,
 ) -> MeshOpResult:
-    context = MeshOpContext(
-        workspace_dir=registry.WORKSPACE_DIR,
-        temp_dir=Path(tempfile.gettempdir()),
-        output_path=output_path,
-        preserve_visuals=preserve_visuals,
-    )
-    try:
+    context = _operation_context(output_path, preserve_visuals)
+    with _mesh_op_http_errors():
         return mesh_ops_registry.run(operation_id, input_path, params, context)
-    except MeshOpNotFoundError as exc:
-        raise HTTPException(404, f"Unknown mesh operation: {operation_id}") from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except (MeshOpUnavailableError, MeshOpExecutionError) as exc:
-        raise HTTPException(503, str(exc)) from exc
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(400, str(exc)) from exc
 
 
 def _operation_response(result: MeshOpResult) -> dict[str, object]:
@@ -186,21 +208,36 @@ def transform_mesh(body: TransformRequest):
     if not np.all(np.isfinite(matrix)):
         raise HTTPException(400, "matrix contains non-finite values")
 
-    # Keep the loaded result as-is (Scene when textured/multi-geometry) so
-    # apply_transform preserves materials and UVs.
-    loaded = trimesh.load(str(input_path))
-    loaded.apply_transform(matrix)
+    output_path = transform_file(input_path, matrix, _transform_output_path(input_path))
 
-    stem = input_path.stem
-    output_name = f"{stem}_xf_{uuid.uuid4().hex[:8]}.glb"
-    workspace = registry.WORKSPACE_DIR.resolve()
-    output_dir = input_path.parent if registry.is_within_workspace(input_path.resolve()) else workspace / "Workflows"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / output_name
-    loaded.export(str(output_path))
-
-    rel = output_path.resolve().relative_to(workspace).as_posix()
+    rel = output_path.resolve().relative_to(registry.WORKSPACE_DIR.resolve()).as_posix()
     return {"url": f"/workspace/{rel}"}
+
+
+@router.post("/arrange")
+def arrange_mesh(body: ArrangeRequest):
+    # Semantic transforms (recenter, drop_to_ground, auto_orient,
+    # normalize_scale) composed into one file, in canonical order.
+    input_path = _resolve_input_path(body.path)
+    with _mesh_op_http_errors(unknown_status=400):
+        steps = [
+            (step_id, mesh_ops_registry.resolve_params(step_id, body.params.get(step_id)))
+            for step_id in body.steps
+        ]
+        result = apply_transforms(
+            input_path,
+            steps,
+            _transform_output_path(input_path),
+            _operation_context(),
+        )
+    return _operation_response(result)
+
+
+def _transform_output_path(input_path: Path) -> Path:
+    return _operation_output_path(
+        input_path,
+        f"{input_path.stem}_xf_{uuid.uuid4().hex[:8]}.glb",
+    )
 
 
 class ImportByPathRequest(BaseModel):
