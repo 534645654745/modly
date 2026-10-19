@@ -116,6 +116,34 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="modly_arrange_mesh",
+            description=(
+                "Reposition a mesh in one call: auto_orient (lay flat), normalize_scale "
+                "(resize), recenter (centre on origin), drop_to_ground (rest on ground). "
+                "Steps always run in that order. Writes a new mesh file."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["auto_orient", "normalize_scale", "recenter", "drop_to_ground"],
+                        },
+                    },
+                    "size": {"type": "number", "description": "normalize_scale: target size in `unit`."},
+                    "unit": {"type": "string", "enum": ["m", "cm", "mm"]},
+                    "dimension": {"type": "string", "enum": ["longest", "x", "y", "z"]},
+                },
+                "required": ["path", "steps"],
+            },
+        ),
+        Tool(
             name="modly_decimate_mesh",
             description="Reduce the polygon count of a mesh using quadric edge collapse decimation.",
             inputSchema={
@@ -252,6 +280,19 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
     elif name in ("modly_inspect_mesh", "modly_suggest_fixes"):
         op = name.removeprefix("modly_")
         r = await client.post(f"{API_BASE}/optimize/op/{op}", json={"path": args["path"]})
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
+    elif name == "modly_arrange_mesh":
+        scale = {k: args[k] for k in ("size", "unit", "dimension") if args.get(k) is not None}
+        r = await client.post(
+            f"{API_BASE}/optimize/arrange",
+            json={
+                "path": args["path"],
+                "steps": args.get("steps") or [],
+                "params": {"normalize_scale": scale} if scale else {},
+            },
+        )
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
 
