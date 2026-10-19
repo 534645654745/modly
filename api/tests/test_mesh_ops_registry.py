@@ -21,6 +21,7 @@ class MeshOpsRegistryTests(unittest.TestCase):
             [description["id"] for description in descriptions],
             [
                 "repair",
+                "repair_mesh",
                 "decimate",
                 "smooth",
                 "inspect_mesh",

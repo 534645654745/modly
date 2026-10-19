@@ -30,6 +30,7 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 - **get_mesh_info** — Get info about the current mesh in the 3D viewer (path, triangle count).
 - **inspect_mesh(path)** — Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.
 - **suggest_fixes(path)** — Inspect a mesh and list the operations (with params) that would fix its problems.
+- **repair_mesh(path, fill_holes?)** — Repair a mesh automatically: fills holes, fixes non-manifold edges, degenerate faces and flipped normals, re-checking until it is closed and manifold. Writes a new, untextured mesh.
 - **arrange_mesh(path, steps, size?, unit?, dimension?)** — Reposition a mesh in one call. Steps: `auto_orient` (lay it flat on its widest side), `normalize_scale` (resize to `size` in `unit`), `recenter` (centre on the origin), `drop_to_ground` (rest it on the ground). Steps always run in that order, whatever order you list them in.
 - **decimate_mesh(path, target_faces)** — Reduce the polygon count of a mesh.
 - **smooth_mesh(path, iterations)** — Apply Laplacian smoothing to a mesh.
@@ -42,6 +43,7 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 
 - Always use tools to act on the scene — never just describe what you would do.
 - If you need the current mesh path, call get_mesh_info first.
+- To repair or fix a mesh, call repair_mesh. Report the issues it could not fix, and warn the user when it says the textures were dropped.
 - To center, ground, lay flat or resize a mesh, call arrange_mesh ONCE with every requested step — never one call per step.
 - To answer questions about a mesh's quality or printability, call inspect_mesh — never guess. Before repairing a mesh, call suggest_fixes to pick the right operations.
 - If you need to run a workflow but don't know the ID, call list_workflows first.
@@ -105,6 +107,34 @@ TOOLS = [
                     "path": {
                         "type": "string",
                         "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "repair_mesh",
+            "description": (
+                "Repair a mesh automatically: fill holes, fix non-manifold edges, degenerate "
+                "faces and flipped normals, re-checking until it is closed and manifold. "
+                "Writes a new mesh without textures; does nothing if the mesh is already sound."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+                    },
+                    "fill_holes": {
+                        "type": "boolean",
+                        "description": (
+                            "Close holes (default true). Set false only for meshes meant to stay open, "
+                            "like terrain: then only flipped faces are fixed."
+                        ),
                     },
                 },
                 "required": ["path"],
@@ -381,6 +411,28 @@ def _format_fixes(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_repair(data: dict) -> tuple[str, dict | None]:
+    """Render a repair_mesh result for the model, plus the viewer update."""
+    remaining = data.get("remaining_issues") or []
+    if not data.get("repaired"):
+        text = "Nothing to repair: the mesh is already closed and manifold."
+        if remaining:
+            text = "Nothing was repaired. Remaining: " + "; ".join(remaining) + "."
+        return text, None
+
+    steps = ", ".join(data.get("steps") or [])
+    lines = [
+        f"Repaired in {data.get('passes', '?')} pass(es) ({steps}).",
+        ("Still remaining: " + "; ".join(remaining) + ".") if remaining
+        else "The mesh is now closed (watertight) and manifold.",
+        f"New mesh path: {data['path']} ({data.get('face_count', '?'):,} faces).",
+    ]
+    if data.get("textures_dropped"):
+        lines.append("The textures and UVs were dropped: the repaired mesh is geometry only.")
+    payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
+    return "\n".join(lines), payload
+
+
 async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, dict | None]:
     """Execute a tool and return (result_text, action_payload).
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
@@ -426,6 +478,17 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                 )
                 r.raise_for_status()
                 return _format_fixes(r.json()), None
+
+            elif name == "repair_mesh":
+                params = {}
+                if arguments.get("fill_holes") is not None:
+                    params["fill_holes"] = bool(arguments["fill_holes"])
+                r = await client.post(
+                    f"{MODLY_API}/optimize/op/repair_mesh",
+                    json={"path": arguments["path"], "params": params},
+                )
+                r.raise_for_status()
+                return _format_repair(r.json())
 
             elif name == "arrange_mesh":
                 scale_params = {

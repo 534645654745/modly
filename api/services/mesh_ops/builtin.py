@@ -2,6 +2,7 @@
 
 from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
+from .repair import auto_repair_mesh
 from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter
 from .types import MeshOp
 
@@ -160,12 +161,34 @@ NORMALIZE_SCALE_PARAMS = (
 )
 
 
+REPAIR_MESH_PARAMS = (
+    {
+        "id": "fill_holes",
+        "label": "Fill Holes",
+        "type": "boolean",
+        "default": True,
+        "tooltip": (
+            "Close every hole, whatever its size. Turn off for meshes that are "
+            "meant to stay open, such as terrain: only flipped faces are then "
+            "fixed, since removing bad faces would open new holes."
+        ),
+    },
+)
+
+
 BUILTIN_MESH_OPS = (
     MeshOp(
         id="repair",
         label="Repair Mesh",
         params_schema=REPAIR_PARAMS,
         fn=repair_mesh,
+        category="repair",
+    ),
+    MeshOp(
+        id="repair_mesh",
+        label="Repair Mesh (auto)",
+        params_schema=REPAIR_MESH_PARAMS,
+        fn=auto_repair_mesh,
         category="repair",
     ),
     MeshOp(
