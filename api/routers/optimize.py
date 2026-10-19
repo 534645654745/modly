@@ -101,6 +101,10 @@ def _run_operation(
 
 
 def _operation_response(result: MeshOpResult) -> dict[str, object]:
+    if result.file_path is None:
+        # Analysis ops (inspect_mesh, suggest_fixes) return only their report.
+        return dict(result.details)
+
     output_path = result.file_path.resolve()
     try:
         relative_path = output_path.relative_to(registry.WORKSPACE_DIR.resolve()).as_posix()

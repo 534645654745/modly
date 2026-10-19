@@ -49,5 +49,74 @@ class UnloadModelsErrorTests(unittest.TestCase):
         self.assertIsNone(payload)
 
 
+class InspectMeshToolTests(unittest.TestCase):
+    REPORT = {
+        "printable": False,
+        "face_count": 11,
+        "vertex_count": 8,
+        "component_count": 1,
+        "is_watertight": False,
+        "is_manifold": True,
+        "is_winding_consistent": True,
+        "hole_count": 1,
+        "boundary_edge_count": 3,
+        "non_manifold_edge_count": 0,
+        "degenerate_face_count": 0,
+        "self_intersecting_face_count": None,
+        "dimensions": [1.0, 2.0, 0.5],
+        "surface_area": 5.5,
+        "volume": None,
+        "has_uvs": False,
+        "has_normals": True,
+        "issues": ["1 hole(s) (3 open boundary edges)"],
+    }
+
+    def _run(self, name: str, response: dict) -> tuple[str, list]:
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=response)
+
+        factory = _MockClientFactory(handler)
+        with mock.patch.object(agent.httpx, "AsyncClient", factory):
+            text, payload = asyncio.run(
+                agent.execute_tool(name, {"path": "Default/mesh.glb"}, {})
+            )
+        self.assertIsNone(payload)
+        return text, requests
+
+    def test_inspect_mesh_calls_the_registry_op_and_summarises(self) -> None:
+        text, requests = self._run("inspect_mesh", self.REPORT)
+
+        self.assertEqual(requests[0].url.path, "/optimize/op/inspect_mesh")
+        self.assertIn("Printable: no", text)
+        self.assertIn("Watertight: no", text)
+        self.assertIn("Self-intersecting faces: not checked", text)
+        self.assertIn("volume: n/a", text)
+        self.assertIn("Issues: 1 hole(s)", text)
+
+    def test_suggest_fixes_lists_ops_and_notes(self) -> None:
+        text, requests = self._run(
+            "suggest_fixes",
+            {
+                "report": self.REPORT,
+                "fixes": [
+                    {"op": "repair", "params": {"fill_holes": True}, "reason": "Repair to fill 1 hole(s)."}
+                ],
+                "notes": ["2 disconnected parts"],
+            },
+        )
+
+        self.assertEqual(requests[0].url.path, "/optimize/op/suggest_fixes")
+        self.assertIn('- repair {"fill_holes": true}', text)
+        self.assertIn("Note: 2 disconnected parts", text)
+
+    def test_suggest_fixes_on_a_clean_mesh(self) -> None:
+        text, _ = self._run("suggest_fixes", {"report": {}, "fixes": [], "notes": []})
+
+        self.assertIn("No fixes needed", text)
+
+
 if __name__ == "__main__":
     unittest.main()
