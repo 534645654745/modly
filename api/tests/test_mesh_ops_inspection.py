@@ -182,9 +182,20 @@ class InspectMeshTests(unittest.TestCase):
         self.assertIsNone(result.file_path)
         self.assertEqual(result.details["report"]["hole_count"], 1)
         fixes = result.details["fixes"]
-        self.assertEqual([fix["op"] for fix in fixes], ["repair"])
-        self.assertTrue(fixes[0]["params"]["fill_holes"])
-        self.assertEqual(fixes[0]["params"]["max_hole_size"], 10)
+        self.assertEqual([fix["op"] for fix in fixes], ["repair_mesh"])
+        self.assertIn("fill 1 hole(s)", fixes[0]["reason"])
+
+    def test_inside_out_mesh_is_reported(self) -> None:
+        mesh = _box()
+        mesh.invert()
+        path = self._export(mesh)
+
+        report = self._inspect(path, check_self_intersections=False)
+
+        self.assertTrue(report["is_watertight"])
+        self.assertTrue(report["is_inside_out"])
+        self.assertFalse(report["printable"])
+        self.assertIn("inside-out (every normal points inwards)", report["issues"])
 
 
 class FixesForReportTests(unittest.TestCase):
@@ -192,6 +203,7 @@ class FixesForReportTests(unittest.TestCase):
         "face_count": 12,
         "component_count": 1,
         "is_winding_consistent": True,
+        "is_inside_out": False,
         "hole_count": 0,
         "largest_hole_edges": 0,
         "non_manifold_edge_count": 0,
@@ -214,18 +226,25 @@ class FixesForReportTests(unittest.TestCase):
 
         fixes, notes = fixes_for_report(report)
 
-        self.assertEqual([fix["op"] for fix in fixes], ["repair", "decimate"])
-        self.assertEqual(fixes[0]["params"]["max_hole_size"], 10000)
+        self.assertEqual([fix["op"] for fix in fixes], ["repair_mesh", "decimate"])
         self.assertEqual(fixes[1]["params"], {"target_faces": DECIMATE_TARGET_FACES})
-        self.assertTrue(any("repair limit" in note for note in notes))
-        repair = mesh_ops_registry.get("repair")
-        declared = {schema["id"] for schema in repair.params_schema}
-        self.assertLessEqual(set(fixes[0]["params"]), declared)
+        self.assertEqual(notes, [])
+        for fix in fixes:
+            declared = {
+                schema["id"] for schema in mesh_ops_registry.get(fix["op"]).params_schema
+            }
+            self.assertLessEqual(set(fix["params"]), declared)
+
+    def test_flipped_or_inside_out_faces_call_for_a_repair(self) -> None:
+        for flaw in ({"is_winding_consistent": False}, {"is_inside_out": True}):
+            with self.subTest(flaw=flaw):
+                fixes, _ = fixes_for_report({**self.CLEAN, **flaw})
+                self.assertEqual([fix["op"] for fix in fixes], ["repair_mesh"])
+                self.assertIn("re-orient", fixes[0]["reason"])
 
     def test_problems_without_an_op_become_notes(self) -> None:
         report = {
             **self.CLEAN,
-            "is_winding_consistent": False,
             "self_intersecting_face_count": 7,
             "component_count": 3,
         }
@@ -233,7 +252,7 @@ class FixesForReportTests(unittest.TestCase):
         fixes, notes = fixes_for_report(report)
 
         self.assertEqual(fixes, [])
-        self.assertEqual(len(notes), 3)
+        self.assertEqual(len(notes), 2)
 
 
 class InspectionRegistryTests(unittest.TestCase):

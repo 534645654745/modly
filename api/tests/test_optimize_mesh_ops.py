@@ -52,14 +52,11 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
                 )
 
         self.assertEqual(descriptions[0]["id"], "repair")
-        self.assertEqual(
-            response,
-            {
-                "path": "Workflows/output.glb",
-                "url": "/workspace/Workflows/output.glb",
-                "face_count": 42,
-            },
-        )
+        # Written next to the input under a unique name, never over it.
+        self.assertRegex(response["path"], r"^input_repair_[0-9a-f]{8}\.glb$")
+        self.assertEqual(response["url"], f"/workspace/{response['path']}")
+        self.assertEqual(response["face_count"], 42)
+        self.assertEqual(registry.calls[0][3].output_path.parent, workspace)
         self.assertEqual(registry.calls[0][0:3], (
             "repair",
             input_path,

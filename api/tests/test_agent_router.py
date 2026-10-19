@@ -119,6 +119,71 @@ class InspectMeshToolTests(unittest.TestCase):
         self.assertIn("No fixes needed", text)
 
 
+class RepairMeshToolTests(unittest.TestCase):
+    def _run(self, arguments: dict, response: dict) -> tuple[str, object, list]:
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=response)
+
+        factory = _MockClientFactory(handler)
+        with mock.patch.object(agent.httpx, "AsyncClient", factory):
+            text, payload = asyncio.run(agent.execute_tool("repair_mesh", arguments, {}))
+        return text, payload, requests
+
+    def test_repaired_mesh_updates_the_viewer_and_warns_about_textures(self) -> None:
+        text, payload, requests = self._run(
+            {"path": "Default/mesh.glb"},
+            {
+                "path": "Workflows/repair-mesh-1.glb",
+                "url": "/workspace/Workflows/repair-mesh-1.glb",
+                "repaired": True,
+                "passes": 2,
+                "steps": ["fix_non_manifold", "fill_holes"],
+                "remaining_issues": [],
+                "face_count": 1276,
+                "textures_dropped": True,
+            },
+        )
+
+        self.assertEqual(requests[0].url.path, "/optimize/op/repair_mesh")
+        self.assertEqual(json.loads(requests[0].content), {"path": "Default/mesh.glb", "params": {}})
+        self.assertIn("now closed (watertight) and manifold", text)
+        self.assertIn("New mesh path: Workflows/repair-mesh-1.glb", text)
+        self.assertIn("textures and UVs were dropped", text)
+        self.assertEqual(payload["type"], "mesh_update")
+        self.assertEqual(payload["url"], "/workspace/Workflows/repair-mesh-1.glb")
+
+    def test_partial_repair_reports_what_remains(self) -> None:
+        text, _, requests = self._run(
+            {"path": "Default/mesh.glb", "fill_holes": False},
+            {
+                "path": "Workflows/repair-mesh-2.glb",
+                "url": "/workspace/Workflows/repair-mesh-2.glb",
+                "repaired": True,
+                "passes": 3,
+                "steps": ["fix_non_manifold"],
+                "remaining_issues": ["1 hole(s) (6 open boundary edges)"],
+                "face_count": 100,
+                "textures_dropped": False,
+            },
+        )
+
+        self.assertEqual(json.loads(requests[0].content)["params"], {"fill_holes": False})
+        self.assertIn("Still remaining: 1 hole(s)", text)
+        self.assertNotIn("textures", text)
+
+    def test_sound_mesh_changes_nothing(self) -> None:
+        text, payload, _ = self._run(
+            {"path": "Default/mesh.glb"},
+            {"repaired": False, "passes": 0, "steps": [], "remaining_issues": []},
+        )
+
+        self.assertIn("Nothing to repair", text)
+        self.assertIsNone(payload)
+
+
 class ArrangeMeshToolTests(unittest.TestCase):
     def _run(self, arguments: dict) -> tuple[str, object, list]:
         requests = []

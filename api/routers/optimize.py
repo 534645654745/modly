@@ -149,8 +149,13 @@ def list_mesh_operations():
 @router.post("/op/{op_name}")
 def run_mesh_operation(op_name: str, body: MeshOpRequest):
     input_path = _resolve_input_path(body.path)
+    # Next to the input, like the dedicated edit routes; analysis ops ignore it.
+    output_path = _operation_output_path(
+        input_path,
+        f"{input_path.stem}_{op_name}_{uuid.uuid4().hex[:8]}.glb",
+    )
     return _operation_response(
-        _run_operation(op_name, input_path, body.params)
+        _run_operation(op_name, input_path, body.params, output_path)
     )
 
 

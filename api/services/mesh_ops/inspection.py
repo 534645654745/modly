@@ -18,8 +18,6 @@ from .types import (
 # both struggle well before the generators' multi-million-face outputs).
 HIGH_FACE_COUNT = 500_000
 DECIMATE_TARGET_FACES = 200_000
-# Mirrors the repair op's max_hole_size bounds.
-MAX_HOLE_SIZE_BOUNDS = (10, 10000)
 
 
 def _trimesh():
@@ -107,6 +105,47 @@ def _edge_topology(merged, trimesh_module) -> dict[str, Any]:
     }
 
 
+def topology_summary(merged, trimesh_module) -> dict[str, Any]:
+    """Topology checks on a position-merged mesh, cheap enough to rerun per pass."""
+    topology = _edge_topology(merged, trimesh_module)
+    is_watertight = bool(merged.is_watertight)
+    is_winding_consistent = bool(merged.is_winding_consistent)
+    return {
+        "is_watertight": is_watertight,
+        "is_winding_consistent": is_winding_consistent,
+        "is_manifold": topology["non_manifold_edge_count"] == 0,
+        # A closed, consistently wound mesh with negative volume has every
+        # normal pointing inwards.
+        "is_inside_out": bool(
+            is_watertight and is_winding_consistent and merged.volume < 0
+        ),
+        **topology,
+        "degenerate_face_count": int(
+            len(merged.faces) - int(merged.nondegenerate_faces().sum())
+        ),
+    }
+
+
+def topology_issues(summary: Mapping[str, Any]) -> list[str]:
+    issues = []
+    if summary["hole_count"]:
+        issues.append(
+            f"{summary['hole_count']} hole(s) "
+            f"({summary['boundary_edge_count']} open boundary edges)"
+        )
+    if summary["non_manifold_edge_count"]:
+        issues.append(
+            f"{summary['non_manifold_edge_count']} non-manifold edge(s)"
+        )
+    if not summary["is_winding_consistent"]:
+        issues.append("inconsistent face winding (normals flipped on some faces)")
+    if summary["is_inside_out"]:
+        issues.append("inside-out (every normal points inwards)")
+    if summary["degenerate_face_count"]:
+        issues.append(f"{summary['degenerate_face_count']} degenerate face(s)")
+    return issues
+
+
 def _self_intersecting_faces(merged, context: MeshOpContext) -> Optional[int]:
     try:
         import pymeshlab
@@ -132,6 +171,7 @@ def _printable(report: Mapping[str, Any]) -> Optional[bool]:
         report["is_watertight"]
         and report["is_winding_consistent"]
         and report["is_manifold"]
+        and not report["is_inside_out"]
     ):
         return False
     if report["self_intersecting_face_count"] is None:
@@ -140,26 +180,13 @@ def _printable(report: Mapping[str, Any]) -> Optional[bool]:
 
 
 def _issues(report: Mapping[str, Any]) -> list[str]:
-    issues = []
-    if report["hole_count"]:
-        issues.append(
-            f"{report['hole_count']} hole(s) "
-            f"({report['boundary_edge_count']} open boundary edges)"
-        )
-    if report["non_manifold_edge_count"]:
-        issues.append(
-            f"{report['non_manifold_edge_count']} non-manifold edge(s)"
-        )
-    if not report["is_winding_consistent"]:
-        issues.append("inconsistent face winding (normals flipped on some faces)")
+    issues = topology_issues(report)
     if report["self_intersecting_face_count"]:
         issues.append(
             f"{report['self_intersecting_face_count']} self-intersecting face(s)"
         )
     if report["self_intersecting_face_count"] is None:
         issues.append("self-intersections were not checked")
-    if report["degenerate_face_count"]:
-        issues.append(f"{report['degenerate_face_count']} degenerate face(s)")
     if report["component_count"] > 1:
         issues.append(f"{report['component_count']} disconnected parts")
     return issues
@@ -183,9 +210,7 @@ def build_report(
 
     context.progress(30, "Analysing topology…")
     merged = merged_geometry(parts, trimesh)
-    topology = _edge_topology(merged, trimesh)
-    is_watertight = bool(merged.is_watertight)
-    is_winding_consistent = bool(merged.is_winding_consistent)
+    topology = topology_summary(merged, trimesh)
 
     self_intersections = None
     if check_self_intersections:
@@ -198,13 +223,7 @@ def build_report(
         "vertex_count": int(sum(len(geometry.vertices) for geometry, _ in parts)),
         "face_count": int(sum(len(geometry.faces) for geometry, _ in parts)),
         "component_count": int(merged.body_count),
-        "is_watertight": is_watertight,
-        "is_winding_consistent": is_winding_consistent,
-        "is_manifold": topology["non_manifold_edge_count"] == 0,
         **topology,
-        "degenerate_face_count": int(
-            len(merged.faces) - int(merged.nondegenerate_faces().sum())
-        ),
         "self_intersecting_face_count": self_intersections,
         "bounds": {
             "min": [float(value) for value in bounds[0]],
@@ -215,7 +234,7 @@ def build_report(
         # The signed volume of an open or mis-wound mesh is meaningless.
         "volume": (
             float(abs(merged.volume))
-            if is_watertight and is_winding_consistent
+            if topology["is_watertight"] and topology["is_winding_consistent"]
             else None
         ),
         "has_uvs": any(_has_uvs(geometry, trimesh) for geometry, _ in parts),
@@ -243,28 +262,16 @@ def fixes_for_report(report: Mapping[str, Any]) -> tuple[list[dict], list[str]]:
         repair_reasons.append("fix non-manifold edges")
     if report["degenerate_face_count"]:
         repair_reasons.append("remove degenerate faces")
+    if not report["is_winding_consistent"] or report["is_inside_out"]:
+        repair_reasons.append("re-orient the faces")
     if repair_reasons:
-        low, high = MAX_HOLE_SIZE_BOUNDS
         fixes.append(
             {
-                "op": "repair",
-                "params": {
-                    "remove_duplicates": True,
-                    "remove_degenerate": bool(report["degenerate_face_count"]),
-                    "fix_non_manifold": bool(report["non_manifold_edge_count"]),
-                    "fill_holes": bool(report["hole_count"]),
-                    "max_hole_size": max(
-                        low, min(high, report["largest_hole_edges"] or low)
-                    ),
-                },
+                "op": "repair_mesh",
+                "params": {},
                 "reason": "Repair to " + ", ".join(repair_reasons) + ".",
             }
         )
-        if report["largest_hole_edges"] > high:
-            notes.append(
-                f"The largest hole has {report['largest_hole_edges']} boundary "
-                f"edges, above the repair limit of {high}; it may stay open."
-            )
 
     if report["face_count"] > HIGH_FACE_COUNT:
         fixes.append(
@@ -278,8 +285,6 @@ def fixes_for_report(report: Mapping[str, Any]) -> tuple[list[dict], list[str]]:
             }
         )
 
-    if not report["is_winding_consistent"]:
-        notes.append("Inconsistent winding has no automatic fix yet.")
     if report["self_intersecting_face_count"]:
         notes.append("Self-intersections have no automatic fix yet.")
     if report["component_count"] > 1:

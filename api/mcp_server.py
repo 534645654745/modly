@@ -116,6 +116,27 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="modly_repair_mesh",
+            description=(
+                "Repair a mesh automatically (holes, non-manifold edges, degenerate faces, "
+                "flipped normals) until it is closed and manifold. Writes a new, untextured mesh."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                    "fill_holes": {
+                        "type": "boolean",
+                        "description": "Close holes (default true).",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
             name="modly_arrange_mesh",
             description=(
                 "Reposition a mesh in one call: auto_orient (lay flat), normalize_scale "
@@ -280,6 +301,15 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
     elif name in ("modly_inspect_mesh", "modly_suggest_fixes"):
         op = name.removeprefix("modly_")
         r = await client.post(f"{API_BASE}/optimize/op/{op}", json={"path": args["path"]})
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
+    elif name == "modly_repair_mesh":
+        params = {} if args.get("fill_holes") is None else {"fill_holes": bool(args["fill_holes"])}
+        r = await client.post(
+            f"{API_BASE}/optimize/op/repair_mesh",
+            json={"path": args["path"], "params": params},
+        )
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
 
