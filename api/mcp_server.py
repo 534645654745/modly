@@ -19,6 +19,7 @@ Requires Modly's FastAPI backend to be running on http://localhost:8765.
 """
 
 import asyncio
+import json
 import mimetypes
 import httpx
 from mcp.server import Server
@@ -81,6 +82,37 @@ async def list_tools() -> list[Tool]:
                     "job_id": {"type": "string", "description": "Job ID returned by modly_generate_from_image."},
                 },
                 "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="modly_inspect_mesh",
+            description=(
+                "Diagnose a mesh without modifying it: watertight, manifold, holes, "
+                "self-intersections, parts, dimensions, volume, UVs/normals, printability."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_suggest_fixes",
+            description="Inspect a mesh and list the operations (with params) that would fix its problems.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                },
+                "required": ["path"],
             },
         ),
         Tool(
@@ -216,6 +248,12 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
         if s.get("error"):
             parts.append(f"Error: {s['error']}")
         return " | ".join(parts)
+
+    elif name in ("modly_inspect_mesh", "modly_suggest_fixes"):
+        op = name.removeprefix("modly_")
+        r = await client.post(f"{API_BASE}/optimize/op/{op}", json={"path": args["path"]})
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
 
     elif name == "modly_decimate_mesh":
         r = await client.post(

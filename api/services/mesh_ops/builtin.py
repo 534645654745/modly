@@ -1,5 +1,6 @@
 """Built-in mesh operation definitions."""
 
+from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
 from .types import MeshOp
 
@@ -106,6 +107,19 @@ SMOOTH_PARAMS = (
 )
 
 
+INSPECT_PARAMS = (
+    {
+        "id": "check_self_intersections",
+        "label": "Check Self-Intersections",
+        "type": "boolean",
+        "default": True,
+        "tooltip": (
+            "Detect intersecting faces. The slowest check on very dense meshes."
+        ),
+    },
+)
+
+
 BUILTIN_MESH_OPS = (
     MeshOp(
         id="repair",
@@ -127,5 +141,19 @@ BUILTIN_MESH_OPS = (
         params_schema=SMOOTH_PARAMS,
         fn=smooth_mesh,
         category="optimization",
+    ),
+    MeshOp(
+        id="inspect_mesh",
+        label="Inspect Mesh",
+        params_schema=INSPECT_PARAMS,
+        fn=inspect_mesh,
+        category="analysis",
+    ),
+    MeshOp(
+        id="suggest_fixes",
+        label="Suggest Fixes",
+        params_schema=INSPECT_PARAMS,
+        fn=suggest_fixes,
+        category="analysis",
     ),
 )

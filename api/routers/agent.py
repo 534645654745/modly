@@ -28,6 +28,8 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 - **list_models** — List all downloaded 3D generation models ready to use.
 - **unload_models** — Unload all 3D generation models from GPU VRAM to free memory.
 - **get_mesh_info** — Get info about the current mesh in the 3D viewer (path, triangle count).
+- **inspect_mesh(path)** — Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.
+- **suggest_fixes(path)** — Inspect a mesh and list the operations (with params) that would fix its problems.
 - **decimate_mesh(path, target_faces)** — Reduce the polygon count of a mesh.
 - **smooth_mesh(path, iterations)** — Apply Laplacian smoothing to a mesh.
 - **get_generation_status(job_id)** — Poll the status of an ongoing 3D generation job.
@@ -39,6 +41,7 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 
 - Always use tools to act on the scene — never just describe what you would do.
 - If you need the current mesh path, call get_mesh_info first.
+- To answer questions about a mesh's quality or printability, call inspect_mesh — never guess. Before repairing a mesh, call suggest_fixes to pick the right operations.
 - If you need to run a workflow but don't know the ID, call list_workflows first.
 - To create a workflow, ONLY use extension ids listed under "Available extensions" in the context. Never invent an id. Chain steps so each step's input type matches the previous step's output type.
 - For a workflow's input, `input_type` MUST be exactly one of: `image`, `text`, or `mesh`. These map to the Image, Text, and Load 3D Mesh nodes. Never invent another input. Pick the one matching the first step's expected input.
@@ -70,6 +73,40 @@ TOOLS = [
             "name": "get_mesh_info",
             "description": "Get information about the current mesh loaded in the 3D viewer (triangle count, path, etc.).",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_mesh",
+            "description": "Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, disconnected parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_fixes",
+            "description": "Inspect a mesh and list the operations (with parameters) that would fix its problems. Does not modify the mesh.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+                    },
+                },
+                "required": ["path"],
+            },
         },
     },
     {
@@ -259,6 +296,42 @@ def _build_workflow_graph(name: str, description: str, input_type: str, steps: l
     return {"name": name, "description": description, "nodes": all_nodes, "edges": edges}
 
 
+def _format_inspection(report: dict) -> str:
+    """Render an inspect_mesh report as compact text for the model."""
+    def yes_no(value) -> str:
+        return "unknown" if value is None else ("yes" if value else "no")
+
+    dims = " × ".join(f"{d:.4g}" for d in report.get("dimensions", []))
+    volume = report.get("volume")
+    self_hits = report.get("self_intersecting_face_count")
+    lines = [
+        f"Printable: {yes_no(report.get('printable'))}",
+        f"Faces: {report.get('face_count', '?'):,}, vertices: {report.get('vertex_count', '?'):,}, parts: {report.get('component_count', '?')}",
+        f"Watertight: {yes_no(report.get('is_watertight'))}, manifold: {yes_no(report.get('is_manifold'))}, consistent winding: {yes_no(report.get('is_winding_consistent'))}",
+        f"Holes: {report.get('hole_count', 0)} ({report.get('boundary_edge_count', 0)} open edges), non-manifold edges: {report.get('non_manifold_edge_count', 0)}, degenerate faces: {report.get('degenerate_face_count', 0)}",
+        f"Self-intersecting faces: {'not checked' if self_hits is None else self_hits}",
+        f"Dimensions: {dims}, surface area: {report.get('surface_area', 0):.4g}, volume: {'n/a (not closed)' if volume is None else f'{volume:.4g}'}",
+        f"UVs: {yes_no(report.get('has_uvs'))}, normals: {yes_no(report.get('has_normals'))}",
+    ]
+    issues = report.get("issues") or []
+    if issues:
+        lines.append("Issues: " + "; ".join(issues))
+    return "\n".join(lines)
+
+
+def _format_fixes(data: dict) -> str:
+    """Render a suggest_fixes result as compact text for the model."""
+    fixes = data.get("fixes") or []
+    notes = data.get("notes") or []
+    if not fixes and not notes:
+        return "No fixes needed — the mesh has no detected problems."
+    lines = ["Suggested operations:"] if fixes else ["No operation can fix the detected problems."]
+    for fix in fixes:
+        lines.append(f"- {fix['op']} {json.dumps(fix.get('params', {}))}: {fix.get('reason', '')}")
+    lines.extend(f"Note: {note}" for note in notes)
+    return "\n".join(lines)
+
+
 async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, dict | None]:
     """Execute a tool and return (result_text, action_payload).
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
@@ -288,6 +361,22 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                 if mesh_triangles:
                     info += f" ({mesh_triangles:,} triangles)"
                 return info, None
+
+            elif name == "inspect_mesh":
+                r = await client.post(
+                    f"{MODLY_API}/optimize/op/inspect_mesh",
+                    json={"path": arguments["path"]},
+                )
+                r.raise_for_status()
+                return _format_inspection(r.json()), None
+
+            elif name == "suggest_fixes":
+                r = await client.post(
+                    f"{MODLY_API}/optimize/op/suggest_fixes",
+                    json={"path": arguments["path"]},
+                )
+                r.raise_for_status()
+                return _format_fixes(r.json()), None
 
             elif name == "decimate_mesh":
                 r = await client.post(
